@@ -156,6 +156,8 @@ struct mdns_outmsg {
   u8_t host_reverse_v6_replies;
   /* Reply bitmask per service */
   u8_t serv_replies[MDNS_MAX_SERVICES];
+  /* Hostname index to include in A and AAAA answers. 0 for name, 1+ for secondary_hostnames */
+  u8_t host_index;
 #ifdef LWIP_MDNS_SEARCH
   /** Search query to send */
   struct mdns_request *query;
@@ -201,6 +203,10 @@ typedef enum {
 struct mdns_host {
   /** Hostname */
   char name[MDNS_LABEL_MAXLEN + 1];
+#if MDNS_MAX_SECONDARY_HOSTNAMES > 0
+  /** Secondary hostnames to respond to */
+  char secondary_hostnames[MDNS_MAX_SECONDARY_HOSTNAMES][MDNS_LABEL_MAXLEN + 1];
+#endif
   /** Pointer to services */
   struct mdns_service *services[MDNS_MAX_SERVICES];
   /** Number of probes/announces sent for the current name */
