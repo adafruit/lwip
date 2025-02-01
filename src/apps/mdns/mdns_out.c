@@ -230,7 +230,8 @@ mdns_add_any_host_question(struct mdns_outpacket *outpkt,
                            u16_t request_unicast_reply)
 {
   struct mdns_domain host;
-  mdns_build_host_domain(&host, mdns);
+  const char* hostname = mdns->name;
+  mdns_build_host_domain(&host, hostname);
   LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Adding host question for ANY type\n"));
   return mdns_add_question(outpkt, &host, DNS_RRTYPE_ANY, DNS_RRCLASS_IN,
                            request_unicast_reply);
@@ -258,7 +259,14 @@ mdns_add_a_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   err_t res;
   u32_t ttl = MDNS_TTL_120;
   struct mdns_domain host;
-  mdns_build_host_domain(&host, netif_mdns_data(netif));
+  struct mdns_host* mdns = netif_mdns_data(netif);
+  const char* hostname = mdns->name;
+#if MDNS_MAX_SECONDARY_HOSTNAMES > 0
+  if (msg->host_index > 0) {
+    hostname = mdns->secondary_hostnames[msg->host_index - 1];
+  }
+#endif
+  mdns_build_host_domain(&host, hostname);
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
   if(msg->legacy_query) {
@@ -289,7 +297,10 @@ mdns_add_hostv4_ptr_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg
   err_t res;
   u32_t ttl = MDNS_TTL_120;
   struct mdns_domain host, revhost;
-  mdns_build_host_domain(&host, netif_mdns_data(netif));
+  struct mdns_host* mdns = netif_mdns_data(netif);
+  /* Always reply with the primary hostname for reverse lookups. */
+  const char* hostname = mdns->name;
+  mdns_build_host_domain(&host, hostname);
   mdns_build_reverse_v4_domain(&revhost, netif_ip4_addr(netif));
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
@@ -322,7 +333,12 @@ mdns_add_aaaa_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   err_t res;
   u32_t ttl = MDNS_TTL_120;
   struct mdns_domain host;
-  mdns_build_host_domain(&host, netif_mdns_data(netif));
+  struct mdns_host* mdns = netif_mdns_data(netif);
+  const char* hostname = mdns->name;
+  if (reply->host_index > 0) {
+    hostname = mdns->secondary_hostnames[reply->host_index - 1];
+  }
+  mdns_build_host_domain(&host, hostname);
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
   if(msg->legacy_query) {
@@ -353,7 +369,10 @@ mdns_add_hostv6_ptr_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg
   err_t res;
   u32_t ttl = MDNS_TTL_120;
   struct mdns_domain host, revhost;
-  mdns_build_host_domain(&host, netif_mdns_data(netif));
+  struct mdns_host* mdns = netif_mdns_data(netif);
+  /* Always reply with the primary hostname for reverse lookups. */
+  const char* hostname = mdns->name;
+  mdns_build_host_domain(&host, hostname);
   mdns_build_reverse_v6_domain(&revhost, netif_ip6_addr(netif, addrindex));
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
@@ -449,7 +468,9 @@ mdns_add_srv_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   struct mdns_domain service_instance, srvhost;
   u16_t srvdata[3];
   mdns_build_service_domain(&service_instance, service, 1);
-  mdns_build_host_domain(&srvhost, mdns);
+  /* Always reply with the primary hostname for services. */
+  const char* hostname = mdns->name;
+  mdns_build_host_domain(&srvhost, hostname);
   if (msg->legacy_query) {
     /* RFC 6762 section 18.14:
      * In legacy unicast responses generated to answer legacy queries,
