@@ -60,6 +60,14 @@
 #define MDNS_MAX_SERVICES               1
 #endif
 
+/** The maximum number of secondary host names per netif. Secondary hostnames
+ * reply to hostname lookup requests but are not used in service replies. This
+ * is useful to share a hostname with multiple devices that redirect to their
+ * unique hostnames. */
+#ifndef MDNS_MAX_SECONDARY_HOSTNAMES
+#define MDNS_MAX_SECONDARY_HOSTNAMES    0
+#endif
+
 /** The minimum delay between probes in ms. RFC 6762 require 250ms.
  * In noisy WiFi environment, adding 30-50ms to this value help a lot for
  * a successful Apple BCT tests.

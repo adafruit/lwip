@@ -243,11 +243,14 @@ get_mdns_pcb(void)
  * @return Bitmask of which replies to send
  */
 static int
-check_host(struct netif *netif, struct mdns_rr_info *rr, u8_t *reverse_v6_reply)
+check_host(struct netif *netif, struct mdns_rr_info *rr, u8_t *reverse_v6_reply, u8_t* host_index)
 {
   err_t res;
   int replies = 0;
+  int i;
   struct mdns_domain mydomain;
+  const char* hostname;
+  struct mdns_host* mdns;
 
   LWIP_UNUSED_ARG(reverse_v6_reply); /* if ipv6 is disabled */
 
@@ -259,7 +262,6 @@ check_host(struct netif *netif, struct mdns_rr_info *rr, u8_t *reverse_v6_reply)
   /* Handle PTR for our addresses */
   if (rr->type == DNS_RRTYPE_PTR || rr->type == DNS_RRTYPE_ANY) {
 #if LWIP_IPV6
-    int i;
     for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
       if (ip6_addr_isvalid(netif_ip6_addr_state(netif, i))) {
         res = mdns_build_reverse_v6_domain(&mydomain, netif_ip6_addr(netif, i));
@@ -283,21 +285,34 @@ check_host(struct netif *netif, struct mdns_rr_info *rr, u8_t *reverse_v6_reply)
 #endif
   }
 
-  res = mdns_build_host_domain(&mydomain, NETIF_TO_HOST(netif));
-  /* Handle requests for our hostname */
-  if (res == ERR_OK && mdns_domain_eq(&rr->domain, &mydomain)) {
-    /* TODO return NSEC if unsupported protocol requested */
-#if LWIP_IPV4
-    if (!ip4_addr_isany_val(*netif_ip4_addr(netif))
-        && (rr->type == DNS_RRTYPE_A || rr->type == DNS_RRTYPE_ANY)) {
-      replies |= REPLY_HOST_A;
+  mdns = NETIF_TO_HOST(netif);
+
+  for (i = 0; i < MDNS_MAX_SECONDARY_HOSTNAMES + 1; i++) {
+    hostname = mdns->name;
+
+#if MDNS_MAX_SECONDARY_HOSTNAMES > 0
+    if (i > 0) {
+      hostname = mdns->secondary_hostnames[i - 1];
     }
+#endif
+    res = mdns_build_host_domain(&mydomain, hostname);
+    /* Handle requests for our hostname */
+    if (res == ERR_OK && mdns_domain_eq(&rr->domain, &mydomain)) {
+      *host_index = i;
+      /* TODO return NSEC if unsupported protocol requested */
+#if LWIP_IPV4
+      if (!ip4_addr_isany_val(*netif_ip4_addr(netif))
+          && (rr->type == DNS_RRTYPE_A || rr->type == DNS_RRTYPE_ANY)) {
+        replies |= REPLY_HOST_A;
+      }
 #endif
 #if LWIP_IPV6
-    if (rr->type == DNS_RRTYPE_AAAA || rr->type == DNS_RRTYPE_ANY) {
-      replies |= REPLY_HOST_AAAA;
-    }
+      if (rr->type == DNS_RRTYPE_AAAA || rr->type == DNS_RRTYPE_ANY) {
+        replies |= REPLY_HOST_AAAA;
+      }
 #endif
+      break;
+    }
   }
 
   return replies;
@@ -672,8 +687,10 @@ mdns_lexicographical_comparison(struct mdns_packet *pkt_a, struct mdns_packet *p
     }
     LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: domain a: len = %d, name = ", domain_a.name[0]));
     mdns_domain_debug_print(&domain_a);
+    LWIP_DEBUGF(MDNS_DEBUG, ("\n"));
     LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: domain b: len = %d, name = ", domain_b.name[0]));
     mdns_domain_debug_print(&domain_b);
+    LWIP_DEBUGF(MDNS_DEBUG, ("\n"));
     /* Compare names pairwise */
     len = LWIP_MIN(domain_a.length, domain_b.length);
     for (i = 0; i < len; i++) {
@@ -1096,7 +1113,7 @@ mdns_parse_pkt_questions(struct netif *netif, struct mdns_packet *pkt,
       reply->unicast_reply_requested = 1;
     }
 
-    reply->host_replies |= check_host(netif, &q.info, &reply->host_reverse_v6_replies);
+    reply->host_replies |= check_host(netif, &q.info, &reply->host_reverse_v6_replies, &reply->host_index);
 
     for (i = 0; i < MDNS_MAX_SERVICES; i++) {
       service = mdns->services[i];
@@ -1130,6 +1147,7 @@ mdns_parse_pkt_known_answers(struct netif *netif, struct mdns_packet *pkt,
   while (pkt->answers_left) {
     struct mdns_answer ans;
     u8_t rev_v6;
+    u8_t host_index;
     int match;
     u32_t rr_ttl = MDNS_TTL_120;
 
@@ -1150,7 +1168,8 @@ mdns_parse_pkt_known_answers(struct netif *netif, struct mdns_packet *pkt,
     }
 
     rev_v6 = 0;
-    match = reply->host_replies & check_host(netif, &ans.info, &rev_v6);
+
+    match = reply->host_replies & check_host(netif, &ans.info, &rev_v6, &host_index);
     if (match && (ans.ttl > (rr_ttl / 2))) {
       /* The RR in the known answer matches an RR we are planning to send,
        * and the TTL is less than half gone.
@@ -1160,8 +1179,16 @@ mdns_parse_pkt_known_answers(struct netif *netif, struct mdns_packet *pkt,
         /* Read domain and compare */
         struct mdns_domain known_ans, my_ans;
         u16_t len;
+        const char* hostname;
         len = mdns_readname(pkt->pbuf, ans.rd_offset, &known_ans);
-        res = mdns_build_host_domain(&my_ans, mdns);
+        hostname = mdns->name;
+
+#if MDNS_MAX_SECONDARY_HOSTNAMES > 0
+        if (host_index > 0) {
+          hostname = mdns->secondary_hostnames[host_index];
+        }
+#endif
+        res = mdns_build_host_domain(&my_ans, hostname);
         if (len != MDNS_READNAME_ERROR && res == ERR_OK && mdns_domain_eq(&known_ans, &my_ans)) {
 #if LWIP_IPV4
           if (match & REPLY_HOST_PTR_V4) {
@@ -1260,7 +1287,7 @@ mdns_parse_pkt_known_answers(struct netif *netif, struct mdns_packet *pkt,
             read_pos += len;
             /* Check host field */
             len = mdns_readname(pkt->pbuf, read_pos, &known_ans);
-            mdns_build_host_domain(&my_ans, mdns);
+            mdns_build_host_domain(&my_ans, mdns->name);
             if (len == MDNS_READNAME_ERROR || !mdns_domain_eq(&known_ans, &my_ans)) {
               break;
             }
@@ -1322,7 +1349,7 @@ mdns_parse_pkt_authoritative_answers(struct netif *netif, struct mdns_packet *pk
     }
 
     rev_v6 = 0;
-    match = reply->host_replies & check_host(netif, &ans.info, &rev_v6);
+    match = reply->host_replies & check_host(netif, &ans.info, &rev_v6, &reply->host_index);
     if (match) {
       reply->probe_query_recv = 1;
       LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Probe for own host info received\n"));
@@ -1747,7 +1774,7 @@ mdns_conflict_save_time(struct netif *netif)
   /* Print timestamp list */
   LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: conflict timestamp list, insert index = %d\n", mdns->index));
   for(i = 0; i < MDNS_PROBE_MAX_CONFLICTS_BEFORE_RATE_LIMIT; i++) {
-    LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: time no. %d = %d\n", i, mdns->conflict_time[i]));
+    LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: time no. %d = %"U32_F"\n", i, mdns->conflict_time[i]));
   }
   /* Check if we had enough conflicts, minimum 15 */
   if (mdns->num_conflicts >= MDNS_PROBE_MAX_CONFLICTS_BEFORE_RATE_LIMIT) {
@@ -1790,7 +1817,7 @@ mdns_probe_conflict(struct netif *netif, s8_t slot)
 }
 
 /**
- * Loockup matching request for response MDNS packet
+ * Lookup matching request for response MDNS packet
  */
 #if LWIP_MDNS_SEARCH
 static struct mdns_request *
@@ -1889,6 +1916,10 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
           flags = MDNS_SEARCH_RESULT_FIRST | MDNS_SEARCH_RESULT_LAST;
       }
       p = pbuf_skip(pkt->pbuf, ans.rd_offset, &offset);
+      if (p == NULL) {
+        LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Malformed response packet, aborting\n"));
+        return;
+      }
       if (ans.info.type == DNS_RRTYPE_PTR || ans.info.type == DNS_RRTYPE_SRV) {
         /* Those RR types have compressed domain name. Must uncompress here,
            since cannot be done without pbuf. */
@@ -1929,9 +1960,9 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
       struct mdns_domain domain;
       u8_t i;
 
-      res = mdns_build_host_domain(&domain, mdns);
+      res = mdns_build_host_domain(&domain, mdns->name);
       if (res == ERR_OK && mdns_domain_eq(&ans.info.domain, &domain)) {
-        LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Probe response matches host domain!"));
+        LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Probe response matches host domain!\n"));
         mdns_probe_conflict(netif, 0);
         break;
       }
@@ -1943,7 +1974,7 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
         }
         res = mdns_build_service_domain(&domain, service, 1);
         if ((res == ERR_OK) && mdns_domain_eq(&ans.info.domain, &domain)) {
-          LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Probe response matches service domain!"));
+          LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Probe response matches service domain!\n"));
           mdns_probe_conflict(netif, i + 1);
           break;
         }
@@ -1966,7 +1997,7 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
       u8_t conflict = 0;
 
       /* Evaluate unique hostname records -> A and AAAA */
-      res = mdns_build_host_domain(&domain, mdns);
+      res = mdns_build_host_domain(&domain, mdns->name);
       if (res == ERR_OK && mdns_domain_eq(&ans.info.domain, &domain)) {
         LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: response matches host domain, assuming conflict\n"));
         /* This means a conflict has taken place, except when the packet contains
@@ -2034,7 +2065,7 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
               read_pos += len;
               /* Check host field */
               len = mdns_readname(pkt->pbuf, read_pos, &srv_ans);
-              mdns_build_host_domain(&my_ans, mdns);
+              mdns_build_host_domain(&my_ans, mdns->name);
               if (len == MDNS_READNAME_ERROR || !mdns_domain_eq(&srv_ans, &my_ans)) {
                 break;
               }
@@ -2494,6 +2525,87 @@ mdns_resp_netif_active(struct netif *netif)
 {
 	return NETIF_TO_HOST(netif) != NULL;
 }
+
+#if MDNS_MAX_SECONDARY_HOSTNAMES > 0
+/**
+ * @ingroup mdns
+ * Adds an additional secondary hostname.
+ * @param netif The network interface to test.
+ * @param hostname Name to use. Queries for &lt;hostname&gt;.local will be answered
+ *                 with the IP addresses of the netif. The hostname will be copied, the
+ *                 given pointer can be on the stack. The hostname will not be used
+ *                 in service answers.
+ * @return ERR_OK if hostname could be added as secondary on netif, an err_t otherwise
+ */
+err_t mdns_resp_add_secondary_hostname(struct netif *netif, const char* hostname) {
+  struct mdns_host *mdns;
+  size_t len;
+  u8_t slot;
+  int i;
+
+  LWIP_ASSERT_CORE_LOCKED();
+  len = strlen(hostname);
+  LWIP_ERROR("mdns_resp_add_secondary_hostname: netif != NULL", (netif != NULL), return ERR_VAL);
+  LWIP_ERROR("mdns_resp_add_secondary_hostname: Hostname too long", (len <= MDNS_LABEL_MAXLEN), return ERR_VAL);
+  mdns = NETIF_TO_HOST(netif);
+  LWIP_ERROR("mdns_resp_add_secondary_hostname: Not an mdns netif", (mdns != NULL), return ERR_VAL);
+
+  slot = MDNS_MAX_SECONDARY_HOSTNAMES;
+  for (i = 0; i < MDNS_MAX_SECONDARY_HOSTNAMES; i++) {
+    if (strlen(mdns->secondary_hostnames[i]) == 0) {
+      slot = i;
+      break;
+    }
+  }
+  LWIP_ERROR("mdns_resp_add_secondary_hostname: Secondary hostname list full (increase MDNS_MAX_SECONDARY_HOSTNAMES)", (slot < MDNS_MAX_SECONDARY_HOSTNAMES), return ERR_MEM);
+
+
+  MEMCPY(&mdns->secondary_hostnames[slot], hostname, LWIP_MIN(MDNS_LABEL_MAXLEN, len));
+  mdns->secondary_hostnames[slot][len] = '\0'; /* null termination in case new name is shorter than previous */
+
+  mdns_resp_restart_delay(netif, MDNS_PROBE_DELAY_MS);
+
+  return ERR_OK;
+}
+
+/**
+ * @ingroup mdns
+ * Deletes an additional secondary hostname.
+ * @param netif The network interface to test.
+ * @param hostname Name to remove. Queries for &lt;hostname&gt;.local will no longer
+ *                 be answered with the IP addresses of the netif.
+ * @return ERR_OK if hostname was removed as secondary on netif, an err_t otherwise
+ */
+err_t mdns_resp_del_secondary_hostname(struct netif *netif, const char* hostname) {
+  struct mdns_host *mdns;
+  size_t len;
+  u8_t slot;
+  int i;
+
+  LWIP_ASSERT_CORE_LOCKED();
+  len = strlen(hostname);
+  LWIP_ERROR("mdns_resp_del_secondary_hostname: netif != NULL", (netif != NULL), return ERR_VAL);
+  LWIP_ERROR("mdns_resp_del_secondary_hostname: Hostname too long", (len <= MDNS_LABEL_MAXLEN), return ERR_VAL);
+  mdns = NETIF_TO_HOST(netif);
+  LWIP_ERROR("mdns_resp_del_secondary_hostname: Not an mdns netif", (mdns != NULL), return ERR_VAL);
+
+  slot = MDNS_MAX_SECONDARY_HOSTNAMES;
+  for (i = 0; i < MDNS_MAX_SECONDARY_HOSTNAMES; i++) {
+    if (strcmp(mdns->secondary_hostnames[i], hostname) == 0) {
+      slot = i;
+      break;
+    }
+  }
+
+  LWIP_ERROR("mdns_resp_del_secondary_hostname: Invalid secondary hostname", slot < MDNS_MAX_SECONDARY_HOSTNAMES, return ERR_VAL);
+
+  mdns->secondary_hostnames[slot][0] = '\0';
+
+  mdns_resp_restart_delay(netif, MDNS_PROBE_DELAY_MS);
+
+  return ERR_OK;
+}
+#endif
 
 /**
  * @ingroup mdns
