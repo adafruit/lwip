@@ -335,9 +335,11 @@ mdns_add_aaaa_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   struct mdns_domain host;
   struct mdns_host* mdns = netif_mdns_data(netif);
   const char* hostname = mdns->name;
+  #if MDNS_MAX_SECONDARY_HOSTNAMES > 0
   if (reply->host_index > 0) {
     hostname = mdns->secondary_hostnames[reply->host_index - 1];
   }
+  #endif
   mdns_build_host_domain(&host, hostname);
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
