@@ -335,9 +335,11 @@ mdns_add_aaaa_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   struct mdns_domain host;
   struct mdns_host* mdns = netif_mdns_data(netif);
   const char* hostname = mdns->name;
+  #if MDNS_MAX_SECONDARY_HOSTNAMES > 0
   if (reply->host_index > 0) {
     hostname = mdns->secondary_hostnames[reply->host_index - 1];
   }
+  #endif
   mdns_build_host_domain(&host, hostname);
   /* When answering to a legacy querier, we need to repeat the question and
    * limit the ttl to the short legacy ttl */
@@ -467,9 +469,9 @@ mdns_add_srv_answer(struct mdns_outpacket *reply, struct mdns_outmsg *msg,
   u32_t ttl = MDNS_TTL_120;
   struct mdns_domain service_instance, srvhost;
   u16_t srvdata[3];
+  const char* hostname = mdns->name;
   mdns_build_service_domain(&service_instance, service, 1);
   /* Always reply with the primary hostname for services. */
-  const char* hostname = mdns->name;
   mdns_build_host_domain(&srvhost, hostname);
   if (msg->legacy_query) {
     /* RFC 6762 section 18.14:
